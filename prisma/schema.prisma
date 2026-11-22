@@ -1,0 +1,285 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+  CANCELLED
+  EXPIRED
+  CHECKED_IN
+  CHECKED_OUT
+  NO_SHOW
+}
+
+enum UnitStatus {
+  ACTIVE
+  INACTIVE
+  MAINTENANCE
+}
+
+enum GalleryCategory {
+  APARTMENTS
+  INTERIORS
+  LIVING_SPACES
+  BEDROOMS
+  BATHROOMS
+  PROPERTY_EXTERIOR
+  GUEST_EXPERIENCES
+}
+
+enum ContactChoice {
+  PRIMARY
+  SECONDARY
+}
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+model AdminUser {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         String   @default("ADMIN")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Inventory: categories & individual units
+// ---------------------------------------------------------------------------
+
+model Category {
+  id               String            @id @default(cuid())
+  slug             String            @unique
+  name             String
+  tagline          String?
+  description      String
+  basePrice        Float             @default(0)
+  currency         String            @default("USD")
+  maxOccupancy     Int               @default(2)
+  maxAdults        Int               @default(2)
+  maxChildren      Int               @default(0)
+  bedConfiguration String            @default("")
+  sizeSqm          Int?
+  viewNote         String?
+  sortOrder        Int               @default(0)
+  active           Boolean           @default(true)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  images           CategoryImage[]
+  amenities        CategoryAmenity[]
+  units            Unit[]
+  bookings         Booking[]
+}
+
+model CategoryImage {
+  id         String   @id @default(cuid())
+  categoryId String
+  url        String
+  alt        String   @default("")
+  sortOrder  Int      @default(0)
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@index([categoryId])
+}
+
+model Unit {
+  id                   String      @id @default(cuid())
+  categoryId           String
+  name                 String
+  number               String
+  description          String?
+  priceOverride        Float?
+  maxOccupancyOverride Int?
+  status               UnitStatus  @default(ACTIVE)
+  maintenanceNote      String?
+  sortOrder            Int         @default(0)
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+  category             Category    @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  images               UnitImage[]
+  bookings             Booking[]
+
+  @@unique([categoryId, number])
+  @@index([categoryId])
+}
+
+model UnitImage {
+  id        String @id @default(cuid())
+  unitId    String
+  url       String
+  alt       String @default("")
+  sortOrder Int    @default(0)
+  unit      Unit   @relation(fields: [unitId], references: [id], onDelete: Cascade)
+
+  @@index([unitId])
+}
+
+// ---------------------------------------------------------------------------
+// Amenities
+// ---------------------------------------------------------------------------
+
+model Amenity {
+  id          String            @id @default(cuid())
+  name        String
+  icon        String            @default("check")
+  description String?
+  active      Boolean           @default(true)
+  sortOrder   Int               @default(0)
+  categories  CategoryAmenity[]
+}
+
+model CategoryAmenity {
+  categoryId String
+  amenityId  String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  amenity    Amenity  @relation(fields: [amenityId], references: [id], onDelete: Cascade)
+
+  @@id([categoryId, amenityId])
+}
+
+// ---------------------------------------------------------------------------
+// Guests & bookings
+// ---------------------------------------------------------------------------
+
+model Guest {
+  id        String    @id @default(cuid())
+  phone     String    @unique
+  name      String
+  email     String?
+  notes     String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  bookings  Booking[]
+}
+
+model Booking {
+  id              String        @id @default(cuid())
+  reference       String        @unique
+  status          BookingStatus @default(PENDING)
+  categoryId      String
+  unitId          String?
+  guestId         String?
+  guestName       String
+  guestPhone      String
+  guestEmail      String?
+  adults          Int           @default(1)
+  children        Int           @default(0)
+  // Calendar dates stored as UTC midnight of the property-local calendar date
+  checkIn         DateTime
+  checkOut        DateTime
+  nights          Int
+  pricePerNight   Float         @default(0)
+  estTotal        Float         @default(0)
+  currency        String        @default("USD")
+  specialRequests String?
+  internalNotes   String?
+  contactChoice   ContactChoice @default(PRIMARY)
+  holdExpiresAt   DateTime?
+  confirmedAt     DateTime?
+  rejectedAt      DateTime?
+  cancelledAt     DateTime?
+  idempotencyKey  String        @unique
+  guestIp         String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  category        Category      @relation(fields: [categoryId], references: [id])
+  unit            Unit?         @relation(fields: [unitId], references: [id])
+  guest           Guest?        @relation(fields: [guestId], references: [id])
+  payments        Payment[]
+
+  @@index([status, holdExpiresAt])
+  @@index([unitId, checkIn, checkOut])
+  @@index([checkIn, checkOut])
+  @@index([guestId])
+}
+
+model Payment {
+  id         String   @id @default(cuid())
+  bookingId  String
+  amount     Float
+  currency   String   @default("USD")
+  method     String   @default("OTHER")
+  note       String?
+  recordedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  booking    Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+}
+
+// ---------------------------------------------------------------------------
+// Editable content
+// ---------------------------------------------------------------------------
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model ContentBlock {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  title     String
+  subtitle  String?
+  body      String?
+  image     String?
+  sortOrder Int      @default(0)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model GalleryImage {
+  id        String          @id @default(cuid())
+  url       String
+  category  GalleryCategory @default(APARTMENTS)
+  caption   String          @default("")
+  alt       String          @default("")
+  sortOrder Int             @default(0)
+  active    Boolean         @default(true)
+  createdAt DateTime        @default(now())
+}
+
+model UploadedImage {
+  id        String   @id @default(cuid())
+  mimeType  String
+  sizeBytes Int
+  data      Bytes
+  createdAt DateTime @default(now())
+}
+
+model ContactMessage {
+  id        String   @id @default(cuid())
+  name      String
+  email     String?
+  phone     String?
+  message   String
+  handled   Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model AdminNotification {
+  id        String   @id @default(cuid())
+  type      String
+  title     String
+  body      String?
+  bookingId String?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}

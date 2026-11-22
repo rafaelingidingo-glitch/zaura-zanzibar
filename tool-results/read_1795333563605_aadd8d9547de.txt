@@ -1,0 +1,556 @@
+     1→     1→"use client";
+     2→     2→
+     3→     3→// Request-to-Book wizard: dates → category & unit → guest details → summary → WhatsApp.
+     4→     4→
+     5→     5→import { useEffect, useMemo, useState } from "react";
+     6→     6→import { useQuery } from "@tanstack/react-query";
+     7→     7→import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+     8→     8→import { Button } from "@/components/ui/button";
+     9→     9→import { Input } from "@/components/ui/input";
+    10→    10→import { Textarea } from "@/components/ui/textarea";
+    11→    11→import { Label } from "@/components/ui/label";
+    12→    12→import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+    13→    13→import { DateField, GuestSelect } from "./fields";
+    14→    14→import { useBookingFlow } from "@/store/booking";
+    15→    15→import { localFromKey, todayInPropertyTz, formatKeyLong, parseDateOnly, nightsBetween } from "@/lib/dates";
+    16→    16→import { formatMoney } from "./atoms";
+    17→    17→import { cn } from "@/lib/utils";
+    18→    18→import { useToast } from "@/hooks/use-toast";
+    19→    19→import type { AvailabilityResponse, SiteSettingsDTO } from "@/types/site";
+    20→    20→import {
+    21→    21→  ChevronLeft, Check, Users, BedDouble, CalendarDays, MessageCircle, ShieldCheck,
+    22→    22→  Loader2, Send, Clock, AlertCircle,
+    23→    23→} from "lucide-react";
+    24→    24→
+    25→    25→const STEPS = ["Dates", "Apartment", "Your details", "Summary"];
+    26→    26→
+    27→    27→export default function BookingWizard({ settings }: { settings: SiteSettingsDTO }) {
+    28→    28→  const flow = useBookingFlow();
+    29→    29→  const { toast } = useToast();
+    30→    30→  const [submitting, setSubmitting] = useState(false);
+    31→    31→  const [guest, setGuest] = useState({ name: "", phone: "", email: "", requests: "" });
+    32→    32→  const [guestErrors, setGuestErrors] = useState<Record<string, string>>({});
+    33→    33→  const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
+    34→    34→
+    35→    35→  const todayKey = todayInPropertyTz().toISOString().slice(0, 10);
+    36→    36→
+    37→    37→  // Availability for chosen dates & guests
+    38→    38→  const availability = useQuery<AvailabilityResponse>({
+    39→    39→    queryKey: ["availability", flow.checkIn, flow.checkOut, flow.adults, flow.children, flow.categoryId],
+    40→    40→    enabled: flow.open && Boolean(flow.checkIn && flow.checkOut && flow.step >= 2),
+    41→    41→    queryFn: async () => {
+    42→    42→      const params = new URLSearchParams({
+    43→    43→        checkIn: flow.checkIn,
+    44→    44→        checkOut: flow.checkOut,
+    45→    45→        adults: String(flow.adults),
+    46→    46→        children: String(flow.children),
+    47→    47→      });
+    48→    48→      if (flow.categoryId) params.set("categoryId", flow.categoryId);
+    49→    49→      const res = await fetch(`/api/availability?${params.toString()}`);
+    50→    50→      if (!res.ok) {
+    51→    51→        const j = await res.json().catch(() => ({}));
+    52→    52→        throw new Error(j.error || "Could not load availability.");
+    53→    53→      }
+    54→    54→      return res.json();
+    55→    55→    },
+    56→    56→  });
+    57→    57→
+    58→    58→  const nights = useMemo(() => {
+    59→    59→    const ci = parseDateOnly(flow.checkIn);
+    60→    60→    const co = parseDateOnly(flow.checkOut);
+    61→    61→    return ci && co ? nightsBetween(ci, co) : 0;
+    62→    62→  }, [flow.checkIn, flow.checkOut]);
+    63→    63→
+    64→    64→  const selectedCategory = availability.data?.categories.find((c) => c.id === flow.categoryId);
+    65→    65→  const selectedUnit = availability.data?.unitDetail?.units.find((u) => u.id === flow.unitId);
+    66→    66→  const pricePerNight = selectedUnit?.pricePerNight ?? selectedCategory?.pricePerNight ?? 0;
+    67→    67→  const estTotal = Math.round(pricePerNight * nights * 100) / 100;
+    68→    68→
+    69→    69→  // Hold countdown after success
+    70→    70→  useEffect(() => {
+    71→    71→    if (flow.step !== 5 || !flow.result?.holdExpiresAt) return;
+    72→    72→    const target = new Date(flow.result.holdExpiresAt).getTime();
+    73→    73→    const tick = () => setSecondsLeft(Math.max(0, Math.floor((target - Date.now()) / 1000)));
+    74→    74→    tick();
+    75→    75→    const t = setInterval(tick, 1000);
+    76→    76→    return () => clearInterval(t);
+    77→    77→  }, [flow.step, flow.result?.holdExpiresAt]);
+    78→    78→
+    79→    79→  const validateGuest = () => {
+    80→    80→    const errs: Record<string, string> = {};
+    81→    81→    if (guest.name.trim().length < 2) errs.name = "Please enter your full name.";
+    82→    82→    if (guest.phone.replace(/[^\d]/g, "").length < 7) errs.phone = "A valid phone number is required.";
+    83→    83→    if (guest.email && !/^\S+@\S+\.\S+$/.test(guest.email)) errs.email = "Please enter a valid email address.";
+    84→    84→    setGuestErrors(errs);
+    85→    85→    return Object.keys(errs).length === 0;
+    86→    86→  };
+    87→    87→
+    88→    88→  const submitRequest = async () => {
+    89→    89→    setSubmitting(true);
+    90→    90→    try {
+    91→    91→      const res = await fetch("/api/bookings", {
+    92→    92→        method: "POST",
+    93→    93→        headers: { "Content-Type": "application/json" },
+    94→    94→        body: JSON.stringify({
+    95→    95→          checkIn: flow.checkIn,
+    96→    96→          checkOut: flow.checkOut,
+    97→    97→          categoryId: flow.categoryId,
+    98→    98→          unitId: flow.unitId || "",
+    99→    99→          adults: flow.adults,
+   100→   100→          children: flow.children,
+   101→   101→          guestName: guest.name.trim(),
+   102→   102→          guestPhone: guest.phone.trim(),
+   103→   103→          guestEmail: guest.email.trim(),
+   104→   104→          specialRequests: guest.requests.trim(),
+   105→   105→          contactChoice: flow.contactChoice,
+   106→   106→          idempotencyKey: `zz-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+   107→   107→        }),
+   108→   108→      });
+   109→   109→      const json = await res.json();
+   110→   110→      if (!res.ok) throw new Error(json.error || "Your request could not be created.");
+   111→   111→      flow.setResult(json.booking, json.whatsapp);
+   112→   112→      flow.setStep(5);
+   113→   113→    } catch (err) {
+   114→   114→      toast({
+   115→   115→        title: "Could not create your request",
+   116→   116→        description: err instanceof Error ? err.message : "Please review your details and try again.",
+   117→   117→        variant: "destructive",
+   118→   118→      });
+   119→   119→    } finally {
+   120→   120→      setSubmitting(false);
+   121→   121→    }
+   122→   122→  };
+   123→   123→
+   124→   124→  const openWhatsApp = (link?: string) => {
+   125→   125→    if (link) window.open(link, "_blank", "noopener,noreferrer");
+   126→   126→  };
+   127→   127→
+   128→   128→  const mm = secondsLeft !== null ? Math.floor(secondsLeft / 60) : null;
+   129→   129→  const ss = secondsLeft !== null ? secondsLeft % 60 : null;
+   130→   130→
+   131→   131→  return (
+   132→   132→    <Dialog open={flow.open} onOpenChange={(o) => !o && flow.closeWizard()}>
+   133→   133→      <DialogContent className="max-w-3xl md:max-w-4xl lg:max-w-5xl p-0 overflow-hidden gap-0 rounded-[4px] bg-ivory max-h-[92vh] z-[75]">
+   134→   134→        <div className="flex flex-col max-h-[92vh]">
+   135→   135→          {/* Header */}
+   136→   136→          <div className="px-6 md:px-10 pt-7 pb-5 border-b border-border/70 bg-ivory">
+   137→   137→            <DialogTitle asChild>
+   138→   138→              <div className="flex items-baseline justify-between gap-4">
+   139→   139→                <h2 className="font-display text-2xl md:text-3xl">
+   140→   140→                  {flow.step === 5 ? "Your request is reserved" : "Request Your Stay"}
+   141→   141→                </h2>
+   142→   142→                <span className="eyebrow text-champagne hidden sm:block">Zaura Zanzibar</span>
+   143→   143→              </div>
+   144→   144→            </DialogTitle>
+   145→   145→            {flow.step < 5 && (
+   146→   146→              <ol className="mt-5 flex items-center gap-2 md:gap-3" aria-label="Booking steps">
+   147→   147→                {STEPS.map((label, i) => {
+   148→   148→                  const n = i + 1;
+   149→   149→                  const active = flow.step === n;
+   150→   150→                  const done = flow.step > n;
+   151→   151→                  return (
+   152→   152→                    <li key={label} className="flex items-center gap-2 md:gap-3">
+   153→   153→                      <span
+   154→   154→                        className={cn(
+   155→   155→                          "flex h-7 w-7 items-center justify-center rounded-full text-[11px] font-medium transition-colors",
+   156→   156→                          active ? "bg-charcoal text-ivory" : done ? "bg-champagne text-charcoal" : "border border-border text-muted-foreground"
+   157→   157→                        )}
+   158→   158→                        aria-current={active ? "step" : undefined}
+   159→   159→                      >
+   160→   160→                        {done ? <Check className="h-3.5 w-3.5" /> : n}
+   161→   161→                      </span>
+   162→   162→                      <span className={cn("text-xs tracking-wide hidden md:block", active ? "text-foreground" : "text-muted-foreground")}>{label}</span>
+   163→   163→                      {i < STEPS.length - 1 && <span className="h-px w-4 md:w-8 bg-border" aria-hidden />}
+   164→   164→                    </li>
+   165→   165→                  );
+   166→   166→                })}
+   167→   167→              </ol>
+   168→   168→            )}
+   169→   169→          </div>
+   170→   170→
+   171→   171→          {/* Body */}
+   172→   172→          <div className="flex-1 overflow-y-auto px-6 md:px-10 py-7">
+   173→   173→            {/* STEP 1 — Dates */}
+   174→   174→            {flow.step === 1 && (
+   175→   175→              <div>
+   176→   176→                <p className="text-[15px] text-muted-foreground leading-relaxed mb-7">
+   177→   177→                  Choose your check-in and check-out dates. You will select your apartment in the next step.
+   178→   178→                </p>
+   179→   179→                <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+   180→   180→                  <DateField
+   181→   181→                    label="Check-in"
+   182→   182→                    value={flow.checkIn}
+   183→   183→                    placeholder="Add date"
+   184→   184→                    disabledBefore={localFromKey(todayKey)}
+   185→   185→                    onChange={(v) => flow.setDates(v, flow.checkOut && v >= flow.checkOut ? "" : flow.checkOut)}
+   186→   186→                  />
+   187→   187→                  <DateField
+   188→   188→                    label="Check-out"
+   189→   189→                    value={flow.checkOut}
+   190→   190→                    placeholder="Add date"
+   191→   191→                    disabledBefore={flow.checkIn ? new Date(localFromKey(flow.checkIn).getTime() + 86400000) : new Date(localFromKey(todayKey).getTime() + 86400000)}
+   192→   192→                    onChange={(v) => flow.setDates(flow.checkIn, v)}
+   193→   193→                  />
+   194→   194→                  <GuestSelect label="Adults" value={flow.adults} onChange={(n) => flow.setGuests(n, flow.children)} max={10} min={1} />
+   195→   195→                  <GuestSelect label="Children" value={flow.children} onChange={(n) => flow.setGuests(flow.adults, n)} max={7} />
+   196→   196→                </div>
+   197→   197→                {nights > 0 && (
+   198→   198→                  <p className="mt-5 flex items-center gap-2 text-sm text-muted-foreground">
+   199→   199→                    <CalendarDays className="h-4 w-4 text-champagne" />
+   200→   200→                    {nights} {nights === 1 ? "night" : "nights"} · {formatKeyLong(flow.checkIn)} → {formatKeyLong(flow.checkOut)}
+   201→   201→                  </p>
+   202→   202→                )}
+   203→   203→              </div>
+   204→   204→            )}
+   205→   205→
+   206→   206→            {/* STEP 2 — Category & unit */}
+   207→   207→            {flow.step === 2 && (
+   208→   208→              <div>
+   209→   209→                {availability.isLoading ? (
+   210→   210→                  <div className="flex flex-col items-center justify-center py-16 gap-3 text-muted-foreground">
+   211→   211→                    <Loader2 className="h-7 w-7 animate-spin text-champagne" />
+   212→   212→                    <p className="text-sm">Checking live availability...</p>
+   213→   213→                  </div>
+   214→   214→                ) : availability.isError ? (
+   215→   215→                  <div className="flex flex-col items-center py-14 gap-3 text-center">
+   216→   216→                    <AlertCircle className="h-7 w-7 text-destructive" />
+   217→   217→                    <p className="text-sm text-destructive">{(availability.error as Error).message}</p>
+   218→   218→                    <Button variant="outline" onClick={() => availability.refetch()} className="rounded-[3px]">Try again</Button>
+   219→   219→                  </div>
+   220→   220→                ) : (
+   221→   221→                  <>
+   222→   222→                    {/* Dates recap + edit */}
+   223→   223→                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-[3px] bg-card border border-border px-4 py-3 mb-7">
+   224→   224→                      <p className="text-sm text-foreground/80">
+   225→   225→                        <span className="font-medium">{formatKeyLong(flow.checkIn)}</span> → <span className="font-medium">{formatKeyLong(flow.checkOut)}</span>
+   226→   226→                        <span className="text-muted-foreground"> · {nights} {nights === 1 ? "night" : "nights"} · {flow.adults + flow.children} {flow.adults + flow.children === 1 ? "guest" : "guests"}</span>
+   227→   227→                      </p>
+   228→   228→                      <Button variant="ghost" onClick={() => flow.setStep(1)} className="eyebrow text-[0.6rem] text-champagne hover:text-charcoal rounded-[3px] px-3 py-2 h-auto">
+   229→   229→                        Edit dates
+   230→   230→                      </Button>
+   231→   231→                    </div>
+   232→   232→
+   233→   233→                    <h3 className="eyebrow text-muted-foreground mb-4">1 · Choose accommodation type</h3>
+   234→   234→                    <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+   235→   235→                      {availability.data?.categories.map((c) => {
+   236→   236→                        const selected = flow.categoryId === c.id;
+   237→   237→                        const reason = !c.fitsGuests ? "Too few rooms for your party" : c.availableUnits === 0 ? "Fully requested" : null;
+   238→   238→                        return (
+   239→   239→                          <button
+   240→   240→                            key={c.id}
+   241→   241→                            disabled={!c.available}
+   242→   242→                            onClick={() => flow.setCategory(c.id)}
+   243→   243→                            className={cn(
+   244→   244→                              "text-left rounded-[3px] border p-4 transition-all duration-300",
+   245→   245→                              selected ? "border-champagne bg-champagne/10 shadow-[0_6px_24px_rgba(197,164,119,0.18)]" : "border-border bg-card hover:border-champagne/60",
+   246→   246→                              !c.available && "opacity-55 cursor-not-allowed"
+   247→   247→                            )}
+   248→   248→                            aria-pressed={selected}
+   249→   249→                          >
+   250→   250→                            <div className="flex items-start justify-between gap-2">
+   251→   251→                              <div>
+   252→   252→                                <p className="font-display text-lg leading-snug">{c.name}</p>
+   253→   253→                                <p className="mt-1 text-xs text-muted-foreground flex items-center gap-1.5">
+   254→   254→                                  <Users className="h-3.5 w-3.5" /> up to {c.maxOccupancy} guests
+   255→   255→                                </p>
+   256→   256→                                <p className="mt-0.5 text-xs text-muted-foreground flex items-center gap-1.5">
+   257→   257→                                  <BedDouble className="h-3.5 w-3.5" /> {c.bedConfiguration || "—"}
+   258→   258→                                </p>
+   259→   259→                              </div>
+   260→   260→                              {selected && <Check className="h-5 w-5 text-champagne shrink-0" />}
+   261→   261→                            </div>
+   262→   262→                            <div className="mt-3 flex items-baseline justify-between">
+   263→   263→                              <span className="text-sm font-medium">{formatMoney(c.pricePerNight, c.currency)}<span className="text-muted-foreground font-normal text-xs"> / night</span></span>
+   264→   264→                              <span className={cn("text-xs", c.available ? "text-olive" : "text-destructive")}>
+   265→   265→                                {reason || `${c.availableUnits} available`}
+   266→   266→                              </span>
+   267→   267→                            </div>
+   268→   268→                          </button>
+   269→   269→                        );
+   270→   270→                      })}
+   271→   271→                    </div>
+   272→   272→
+   273→   273→                    {/* Units */}
+   274→   274→                    {flow.categoryId && availability.data?.unitDetail && (
+   275→   275→                      <>
+   276→   276→                        <h3 className="eyebrow text-muted-foreground mt-9 mb-2">2 · Choose your apartment</h3>
+   277→   277→                        <p className="text-xs text-muted-foreground mb-4">
+   278→   278→                          Each apartment is individually reserved. Pick a specific apartment, or let us assign the best one available.
+   279→   279→                        </p>
+   280→   280→                        <div
+   281→   281→                          role="button"
+   282→   282→                          tabIndex={0}
+   283→   283→                          onClick={() => flow.setUnit(null)}
+   284→   284→                          onKeyDown={(e) => e.key === "Enter" && flow.setUnit(null)}
+   285→   285→                          className={cn(
+   286→   286→                            "cursor-pointer rounded-[3px] border px-4 py-3.5 flex items-center justify-between transition-all mb-3",
+   287→   287→                            flow.unitId === null ? "border-champagne bg-champagne/10" : "border-border bg-card hover:border-champagne/50"
+   288→   288→                          )}
+   289→   289→                        >
+   290→   290→                          <span className="text-sm">No preference — assign me the best available apartment</span>
+   291→   291→                          {flow.unitId === null && <Check className="h-4 w-4 text-champagne" />}
+   292→   292→                        </div>
+   293→   293→                        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+   294→   294→                          {availability.data.unitDetail.units.map((u) => {
+   295→   295→                            const selected = flow.unitId === u.id;
+   296→   296→                            const label = u.available ? "Available" : u.reason === "BOOKED" ? "Temporarily held" : u.reason === "MAINTENANCE" ? "Maintenance" : "Unavailable";
+   297→   297→                            return (
+   298→   298→                              <button
+   299→   299→                                key={u.id}
+   300→   300→                                disabled={!u.available}
+   301→   301→                                onClick={() => flow.setUnit(u.id)}
+   302→   302→                                className={cn(
+   303→   303→                                  "text-left rounded-[3px] border p-4 transition-all duration-300",
+   304→   304→                                  selected ? "border-champagne bg-champagne/10" : "border-border bg-card",
+   305→   305→                                  u.available ? "hover:border-champagne/60" : "opacity-50 cursor-not-allowed bg-muted/50"
+   306→   306→                                )}
+   307→   307→                                aria-pressed={selected}
+   308→   308→                              >
+   309→   309→                                <div className="flex items-center justify-between">
+   310→   310→                                  <p className="font-display text-base">{u.name}</p>
+   311→   311→                                  {selected && <Check className="h-4 w-4 text-champagne" />}
+   312→   312→                                </div>
+   313→   313→                                <p className="mt-1.5 text-xs text-muted-foreground">
+   314→   314→                                  {u.available ? `${formatMoney(u.pricePerNight, availability.data?.currency || "USD")} / night · up to ${u.maxOccupancy} guests` : label}
+   315→   315→                                </p>
+   316→   316→                              </button>
+   317→   317→                            );
+   318→   318→                          })}
+   319→   319→                        </div>
+   320→   320→                      </>
+   321→   321→                    )}
+   322→   322→                  </>
+   323→   323→                )}
+   324→   324→              </div>
+   325→   325→            )}
+   326→   326→
+   327→   327→            {/* STEP 3 — Guest details */}
+   328→   328→            {flow.step === 3 && (
+   329→   329→              <div className="max-w-2xl">
+   330→   330→                <p className="text-[15px] text-muted-foreground leading-relaxed mb-7">
+   331→   331→                  Your request will be saved and held for a short time. You will finish the conversation directly with our team on WhatsApp.
+   332→   332→                </p>
+   333→   333→                <div className="grid sm:grid-cols-2 gap-4">
+   334→   334→                  <div className="flex flex-col gap-1.5 sm:col-span-2">
+   335→   335→                    <Label htmlFor="bw-name" className="text-xs font-medium tracking-wide">Full name *</Label>
+   336→   336→                    <Input id="bw-name" className="zaura-input rounded-[3px] h-11" value={guest.name} onChange={(e) => setGuest({ ...guest, name: e.target.value })} placeholder="e.g. John Doe" autoComplete="name" />
+   337→   337→                    {guestErrors.name && <p className="text-xs text-destructive">{guestErrors.name}</p>}
+   338→   338→                  </div>
+   339→   339→                  <div className="flex flex-col gap-1.5">
+   340→   340→                    <Label htmlFor="bw-phone" className="text-xs font-medium tracking-wide">Phone number (WhatsApp) *</Label>
+   341→   341→                    <Input id="bw-phone" className="zaura-input rounded-[3px] h-11" value={guest.phone} onChange={(e) => setGuest({ ...guest, phone: e.target.value })} placeholder="+254 / +255 ..." autoComplete="tel" />
+   342→   342→                    {guestErrors.phone && <p className="text-xs text-destructive">{guestErrors.phone}</p>}
+   343→   343→                  </div>
+   344→   344→                  <div className="flex flex-col gap-1.5">
+   345→   345→                    <Label htmlFor="bw-email" className="text-xs font-medium tracking-wide">Email (optional)</Label>
+   346→   346→                    <Input id="bw-email" type="email" className="zaura-input rounded-[3px] h-11" value={guest.email} onChange={(e) => setGuest({ ...guest, email: e.target.value })} placeholder="you@example.com" autoComplete="email" />
+   347→   347→                    {guestErrors.email && <p className="text-xs text-destructive">{guestErrors.email}</p>}
+   348→   348→                  </div>
+   349→   349→                  <div className="flex flex-col gap-1.5 sm:col-span-2">
+   350→   350→                    <Label htmlFor="bw-requests" className="text-xs font-medium tracking-wide">Special requests (optional)</Label>
+   351→   351→                    <Textarea id="bw-requests" rows={3} className="zaura-input rounded-[3px] resize-none" value={guest.requests} onChange={(e) => setGuest({ ...guest, requests: e.target.value })} placeholder="Airport pick-up, late check-in, celebrations..." />
+   352→   352→                  </div>
+   353→   353→                </div>
+   354→   354→
+   355→   355→                {settings.primaryContact === "GUEST_CHOICE" && (
+   356→   356→                  <div className="mt-7">
+   357→   357→                    <Label className="eyebrow text-muted-foreground text-[0.6rem] mb-3 block">Send my request to</Label>
+   358→   358→                    <RadioGroup
+   359→   359→                      value={flow.contactChoice}
+   360→   360→                      onValueChange={(v) => flow.setContactChoice(v as "PRIMARY" | "SECONDARY")}
+   361→   361→                      className="grid sm:grid-cols-2 gap-3"
+   362→   362→                    >
+   363→   363→                      {[
+   364→   364→                        { value: "PRIMARY", label: "Reservations Line 1", phone: settings.whatsappPrimary },
+   365→   365→                        { value: "SECONDARY", label: "Reservations Line 2", phone: settings.whatsappSecondary },
+   366→   366→                      ].map((opt) => (
+   367→   367→                        <Label
+   368→   368→                          key={opt.value}
+   369→   369→                          htmlFor={`bw-contact-${opt.value}`}
+   370→   370→                          className={cn(
+   371→   371→                            "flex cursor-pointer items-center gap-3 rounded-[3px] border px-4 py-3.5 transition-colors",
+   372→   372→                            flow.contactChoice === opt.value ? "border-champagne bg-champagne/10" : "border-border bg-card"
+   373→   373→                          )}
+   374→   374→                        >
+   375→   375→                          <RadioGroupItem id={`bw-contact-${opt.value}`} value={opt.value} />
+   376→   376→                          <span>
+   377→   377→                            <span className="block text-sm font-medium">{opt.label}</span>
+   378→   378→                            <span className="block text-xs text-muted-foreground mt-0.5">{opt.phone}</span>
+   379→   379→                          </span>
+   380→   380→                        </Label>
+   381→   381→                      ))}
+   382→   382→                    </RadioGroup>
+   383→   383→                  </div>
+   384→   384→                )}
+   385→   385→              </div>
+   386→   386→            )}
+   387→   387→
+   388→   388→            {/* STEP 4 — Summary */}
+   389→   389→            {flow.step === 4 && (
+   390→   390→              <div className="max-w-2xl">
+   391→   391→                <div className="rounded-[3px] border border-border bg-card overflow-hidden">
+   392→   392→                  <div className="px-6 py-5 border-b border-border/70 bg-muted/40">
+   393→   393→                    <p className="eyebrow text-champagne">Booking summary</p>
+   394→   394→                  </div>
+   395→   395→                  <dl className="px-6 py-5 grid sm:grid-cols-2 gap-x-8 gap-y-4 text-sm">
+   396→   396→                    <div><dt className="text-muted-foreground text-xs">Apartment type</dt><dd className="mt-1 font-medium">{selectedCategory?.name || "—"}</dd></div>
+   397→   397→                    <div><dt className="text-muted-foreground text-xs">Apartment</dt><dd className="mt-1 font-medium">{flow.unitId ? selectedUnit?.name : "Best available — assigned by our team"}</dd></div>
+   398→   398→                    <div><dt className="text-muted-foreground text-xs">Check-in</dt><dd className="mt-1 font-medium">{formatKeyLong(flow.checkIn)}</dd></div>
+   399→   399→                    <div><dt className="text-muted-foreground text-xs">Check-out</dt><dd className="mt-1 font-medium">{formatKeyLong(flow.checkOut)}</dd></div>
+   400→   400→                    <div><dt className="text-muted-foreground text-xs">Guests</dt><dd className="mt-1 font-medium">{flow.adults} adults{flow.children ? ` + ${flow.children} children` : ""}</dd></div>
+   401→   401→                    <div><dt className="text-muted-foreground text-xs">Nights</dt><dd className="mt-1 font-medium">{nights}</dd></div>
+   402→   402→                    <div><dt className="text-muted-foreground text-xs">Price per night</dt><dd className="mt-1 font-medium">{formatMoney(pricePerNight, selectedCategory?.currency || settings.currency)}</dd></div>
+   403→   403→                    <div><dt className="text-muted-foreground text-xs">Estimated total</dt><dd className="mt-1 font-medium text-champagne">{formatMoney(estTotal, selectedCategory?.currency || settings.currency)}</dd></div>
+   404→   404→                    <div className="sm:col-span-2"><dt className="text-muted-foreground text-xs">Guest</dt><dd className="mt-1 font-medium">{guest.name || "—"} · {guest.phone}{guest.email ? ` · ${guest.email}` : ""}</dd></div>
+   405→   405→                    {guest.requests && <div className="sm:col-span-2"><dt className="text-muted-foreground text-xs">Special requests</dt><dd className="mt-1">{guest.requests}</dd></div>}
+   406→   406→                  </dl>
+   407→   407→                  <div className="px-6 py-4 border-t border-border/70 bg-muted/40 flex items-start gap-2.5 text-xs text-muted-foreground leading-relaxed">
+   408→   408→                    <Clock className="h-4 w-4 text-champagne shrink-0 mt-0.5" />
+   409→   409→                    On submission, this apartment is held for you for {settings.pendingExpiryMinutes} minutes while you complete your WhatsApp request. Opening WhatsApp does not send the message automatically — you will need to press SEND.
+   410→   410→                  </div>
+   411→   411→                </div>
+   412→   412→                <p className="mt-4 flex items-start gap-2 text-xs text-muted-foreground">
+   413→   413→                  <ShieldCheck className="h-4 w-4 text-olive shrink-0 mt-0.5" />
+   414→   414→                  A request is not a confirmation. Our team confirms availability personally and replies with reservation details.
+   415→   415→                </p>
+   416→   416→              </div>
+   417→   417→            )}
+   418→   418→
+   419→   419→            {/* STEP 5 — Success */}
+   420→   420→            {flow.step === 5 && flow.result && (
+   421→   421→              <div className="max-w-2xl mx-auto text-center py-4">
+   422→   422→                <span className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-whatsapp/10 border border-whatsapp/30">
+   423→   423→                  <Check className="h-7 w-7 text-whatsapp" />
+   424→   424→                </span>
+   425→   425→                <h3 className="mt-5 font-display text-3xl">Thank you, {flow.result.guestName.split(" ")[0]}.</h3>
+   426→   426→                <p className="mt-2 text-sm text-muted-foreground">
+   427→   427→                  Your booking request has been saved. Your reference is
+   428→   428→                </p>
+   429→   429→                <p className="mt-3 font-display text-2xl tracking-wide text-champagne" aria-label="Booking reference">
+   430→   430→                  {flow.result.reference}
+   431→   431→                </p>
+   432→   432→                {secondsLeft !== null && secondsLeft > 0 && (
+   433→   433→                  <p className="mt-3 text-xs text-muted-foreground inline-flex items-center gap-1.5">
+   434→   434→                    <Clock className="h-3.5 w-3.5 text-champagne" />
+   435→   435→                    Your apartment is held for approximately {mm}m {String(ss).padStart(2, "0")}s — press SEND in WhatsApp now.
+   436→   436→                  </p>
+   437→   437→                )}
+   438→   438→
+   439→   439→                <div className="mt-7 rounded-[3px] border border-whatsapp/30 bg-whatsapp/5 p-5 text-left">
+   440→   440→                  <p className="text-sm font-medium flex items-center gap-2">
+   441→   441→                    <MessageCircle className="h-4 w-4 text-whatsapp" />
+   442→   442→                    One step remains — send your request on WhatsApp
+   443→   443→                  </p>
+   444→   444→                  <ol className="mt-3 space-y-1.5 text-sm text-muted-foreground list-decimal list-inside">
+   445→   445→                    <li>Tap the button below — WhatsApp opens with your booking request pre-filled.</li>
+   446→   446→                    <li>Press <span className="font-medium text-foreground">SEND</span> in WhatsApp to deliver it to our team.</li>
+   447→   447→                    <li>We reply personally to confirm availability and reservation details.</li>
+   448→   448→                  </ol>
+   449→   449→                  <div className="mt-5 grid sm:grid-cols-2 gap-3">
+   450→   450→                    {flow.whatsappLinks.primary && (
+   451→   451→                      <Button
+   452→   452→                        onClick={() => openWhatsApp(flow.whatsappLinks.primary)}
+   453→   453→                        className="h-12 eyebrow bg-whatsapp text-ivory rounded-[3px] hover:bg-whatsapp/90 transition-colors"
+   454→   454→                      >
+   455→   455→                        <Send className="h-4 w-4" /> Open WhatsApp
+   456→   456→                      </Button>
+   457→   457→                    )}
+   458→   458→                    {flow.whatsappLinks.secondary && (
+   459→   459→                      <Button
+   460→   460→                        onClick={() => openWhatsApp(flow.whatsappLinks.secondary)}
+   461→   461→                        variant="outline"
+   462→   462→                        className="h-12 eyebrow rounded-[3px] border-whatsapp/50 text-whatsapp hover:bg-whatsapp/10"
+   463→   463→                      >
+   464→   464→                        <Send className="h-4 w-4" /> Line 2 instead
+   465→   465→                      </Button>
+   466→   466→                    )}
+   467→   467→                  </div>
+   468→   468→                  {!flow.whatsappLinks.primary && !flow.whatsappLinks.secondary && (
+   469→   469→                    <p className="mt-4 text-sm text-destructive">
+   470→   470→                      No WhatsApp contact is configured. Please call {settings.propertyPhoneDisplay} and quote your reference.
+   471→   471→                    </p>
+   472→   472→                  )}
+   473→   473→                </div>
+   474→   474→                <p className="mt-5 text-xs text-muted-foreground">
+   475→   475→                  Keep your reference {flow.result.reference} — quote it in any conversation with our team.
+   476→   476→                </p>
+   477→   477→              </div>
+   478→   478→            )}
+   479→   479→          </div>
+   480→   480→
+   481→   481→          {/* Footer actions */}
+   482→   482→          <div className="px-6 md:px-10 py-5 border-t border-border/70 bg-ivory flex items-center justify-between gap-3">
+   483→   483→            {flow.step === 1 && (
+   484→   484→              <>
+   485→   485→                <Button variant="ghost" onClick={flow.closeWizard} className="rounded-[3px] text-muted-foreground">Cancel</Button>
+   486→   486→                <Button
+   487→   487→                  onClick={() => {
+   488→   488→                    if (!flow.checkIn || !flow.checkOut) return toast({ title: "Select your dates", description: "Please choose check-in and check-out dates.", variant: "destructive" });
+   489→   489→                    if (flow.checkOut <= flow.checkIn) return toast({ title: "Check your dates", description: "Check-out must be after check-in.", variant: "destructive" });
+   490→   490→                    flow.setStep(2);
+   491→   491→                  }}
+   492→   492→                  className="eyebrow bg-charcoal text-ivory rounded-[3px] px-6 py-3 hover:bg-champagne hover:text-charcoal"
+   493→   493→                >
+   494→   494→                  Continue
+   495→   495→                </Button>
+   496→   496→              </>
+   497→   497→            )}
+   498→   498→            {flow.step === 2 && (
+   499→   499→              <>
+   500→   500→                <Button variant="ghost" onClick={() => flow.setStep(1)} className="rounded-[3px] text-muted-foreground gap-1.5">
+   501→   501→                  <ChevronLeft className="h-4 w-4" /> Dates
+   502→   502→                </Button>
+   503→   503→                <Button
+   504→   504→                  onClick={() => flow.setStep(3)}
+   505→   505→                  disabled={!flow.categoryId || availability.isLoading}
+   506→   506→                  className="eyebrow bg-charcoal text-ivory rounded-[3px] px-6 py-3 hover:bg-champagne hover:text-charcoal disabled:opacity-50"
+   507→   507→                >
+   508→   508→                  Continue
+   509→   509→                </Button>
+   510→   510→              </>
+   511→   511→            )}
+   512→   512→            {flow.step === 3 && (
+   513→   513→              <>
+   514→   514→                <Button variant="ghost" onClick={() => flow.setStep(2)} className="rounded-[3px] text-muted-foreground gap-1.5">
+   515→   515→                  <ChevronLeft className="h-4 w-4" /> Apartment
+   516→   516→                </Button>
+   517→   517→                <Button
+   518→   518→                  onClick={() => {
+   519→   519→                    if (validateGuest()) flow.setStep(4);
+   520→   520→                  }}
+   521→   521→                  className="eyebrow bg-charcoal text-ivory rounded-[3px] px-6 py-3 hover:bg-champagne hover:text-charcoal"
+   522→   522→                >
+   523→   523→                  Review request
+   524→   524→                </Button>
+   525→   525→              </>
+   526→   526→            )}
+   527→   527→            {flow.step === 4 && (
+   528→   528→              <>
+   529→   529→                <Button variant="ghost" onClick={() => flow.setStep(3)} className="rounded-[3px] text-muted-foreground gap-1.5">
+   530→   530→                  <ChevronLeft className="h-4 w-4" /> Details
+   531→   531→                </Button>
+   532→   532→                <Button
+   533→   533→                  onClick={submitRequest}
+   534→   534→                  disabled={submitting}
+   535→   535→                  className="eyebrow bg-whatsapp text-ivory rounded-[3px] px-6 py-3 hover:bg-whatsapp/90 disabled:opacity-60 gap-2"
+   536→   536→                >
+   537→   537→                  {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}
+   538→   538→                  {submitting ? "Reserving..." : "Request your stay via WhatsApp"}
+   539→   539→                </Button>
+   540→   540→              </>
+   541→   541→            )}
+   542→   542→            {flow.step === 5 && (
+   543→   543→              <>
+   544→   544→                <span className="text-xs text-muted-hidden text-muted-foreground">Reference {flow.result?.reference}</span>
+   545→   545→                <Button variant="outline" onClick={flow.closeWizard} className="rounded-[3px] eyebrow">
+   546→   546→                  Done
+   547→   547→                </Button>
+   548→   548→              </>
+   549→   549→            )}
+   550→   550→          </div>
+   551→   551→        </div>
+   552→   552→      </DialogContent>
+   553→   553→    </Dialog>
+   554→   554→  );
+   555→   555→}
+   556→   556→
